@@ -208,21 +208,15 @@ func (s *Stream) maintenanceLoop(group string) {
 		}
 		time.Sleep(maintenanceLoopInterval)
 	}
-
 }
 
-func (s *Stream) performMaintenance(ctx context.Context, group string) error {
-	// FIX A: Increased lock timeout (2s) so pods wait for each other
+func (s *Stream) performMaintenanceInternal(ctx context.Context, group string) error {
+	// We do NOT call s.mu.Lock() here because the caller must hold it.
 	lock, err := s.locker.Acquire(ctx, s.streamGroupAdmin(group), 2*time.Second, "")
 	if err != nil {
 		return err
 	}
-	defer func(lock locker.Lock, ctx context.Context) {
-		err := lock.Release(ctx)
-		if err != nil {
-			s.logger.Error().Err(err).Msgf("error releasing stream admin lock")
-		}
-	}(lock, ctx)
+	defer lock.Release(ctx)
 
 	members, err := s.members(ctx, group)
 	if err != nil {
@@ -230,11 +224,11 @@ func (s *Stream) performMaintenance(ctx context.Context, group string) error {
 	}
 
 	deadMembers := s.calculateDeadMembers(ctx, members)
-	// FIX B: Identify missing local members (pods that are alive but not in mbsh)
 	var missingMembers []member
-	s.mu.Lock()
+
+	// Safe to access s.consumers because caller holds the lock
 	if groupMap, ok := s.consumers[group]; ok {
-		for id, _ := range groupMap {
+		for id := range groupMap {
 			if !members.Contains(id) {
 				missingMembers = append(missingMembers, member{
 					ID: id, JoinedAt: time.Now().UnixMilli(), Group: group,
@@ -242,22 +236,25 @@ func (s *Stream) performMaintenance(ctx context.Context, group string) error {
 			}
 		}
 	}
-	s.mu.Unlock()
 
-	// If no changes are needed, exit early
 	if len(deadMembers) == 0 && len(missingMembers) == 0 {
 		return nil
 	}
-	// Apply the changes: Remove dead, Add missing
+
 	aliveMembers := members.RemoveAll(deadMembers)
 	for _, m := range missingMembers {
-		// Double check to avoid duplicates
 		if !aliveMembers.Contains(m.ID) {
 			aliveMembers = append(aliveMembers, m)
 		}
 	}
 	sort.Sort(aliveMembers)
 	return s.updateMembers(ctx, aliveMembers, group)
+}
+
+func (s *Stream) performMaintenance(ctx context.Context, group string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.performMaintenanceInternal(ctx, group)
 }
 
 func (s *Stream) calculateDeadMembers(ctx context.Context, members members) members {
@@ -394,7 +391,7 @@ func (s *Stream) registerConsumer(ctx context.Context, group string, batchSize i
 	}
 
 	if _, ok := s.consumers[c.group]; !ok {
-		err := s.performMaintenance(ctx, c.group)
+		err := s.performMaintenanceInternal(ctx, c.group)
 		if err != nil {
 			_ = c.ShutDown()
 			return nil, err
