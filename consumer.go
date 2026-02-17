@@ -3,13 +3,14 @@ package segmenter
 import (
 	"context"
 	"errors"
+	"math"
+	"sync"
+	"time"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/hextechpal/segmenter/api/proto/contracts"
 	"github.com/hextechpal/segmenter/internal/segmenter/utils"
 	"github.com/rs/zerolog"
-	"math"
-	"sync"
-	"time"
 )
 
 const heartBeatDuration = 2 * time.Second
@@ -30,6 +31,7 @@ type Consumer struct {
 
 	segmentMap map[partition]*segment
 	shutDown   chan bool
+	closeOnce  sync.Once // FIX: Ensures channel is closed only once
 	active     bool
 }
 
@@ -107,10 +109,15 @@ func (c *Consumer) Ack(ctx context.Context, cmessage *contracts.CMessage) error 
 func (c *Consumer) ShutDown() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, sg := range c.segmentMap {
-		sg.stop()
-	}
-	c.shutDown <- true
+
+	// FIX: Use sync.Once to safely close the channel without blocking
+	c.closeOnce.Do(func() {
+		c.active = false
+		for _, sg := range c.segmentMap {
+			sg.stop() // Now calls close() internally
+		}
+		close(c.shutDown) // Broadcasting shutdown to beat() loop
+	})
 	return nil
 }
 

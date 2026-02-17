@@ -3,10 +3,12 @@ package segmenter
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/hextechpal/segmenter/internal/segmenter/locker"
 	"github.com/rs/zerolog"
-	"time"
 )
 
 const lockDuration = 10 * time.Second
@@ -16,6 +18,7 @@ type segment struct {
 	partition partition
 	lock      locker.Lock
 	shutDown  chan bool
+	closeOnce sync.Once // FIX: Safety for channel closing
 
 	logger *zerolog.Logger
 }
@@ -118,5 +121,8 @@ func (sg *segment) partitionLockKey() string {
 }
 
 func (sg *segment) stop() {
-	sg.shutDown <- true
+	// FIX: Close instead of send to avoid blocking the main thread during ShutDown()
+	sg.closeOnce.Do(func() {
+		close(sg.shutDown)
+	})
 }
