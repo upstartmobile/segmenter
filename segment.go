@@ -51,9 +51,10 @@ func (sg *segment) refreshLock() {
 			err := sg.lock.Refresh(ctx, lockDuration)
 			if err != nil {
 				sg.logger.Error().Err(err).Msgf("Error happened while refreshing lock %s", sg.lock.Key())
+				return
 			}
 		}
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(5 * time.Second)
 	}
 
 }
