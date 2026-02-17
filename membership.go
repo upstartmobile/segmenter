@@ -61,14 +61,14 @@ func (ms members) Swap(i, j int) {
 	ms[i], ms[j] = ms[j], ms[i]
 }
 
-func (ms members) RemoveAll(members members) members {
-	removed := make([]member, ms.Len()-members.Len())
-	idx := 0
+func (ms members) RemoveAll(toRemove members) members {
+	// SAFE: We start with an empty slice and let Go handle the growth
+	result := make([]member, 0)
 	for _, m := range ms {
-		if !members.Contains(m.ID) {
-			removed[idx] = m
-			idx++
+		// If the current member is NOT in the 'toRemove' list, keep them
+		if !toRemove.Contains(m.ID) {
+			result = append(result, m)
 		}
 	}
-	return removed
+	return result
 }

@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
+	"sync"
+	"time"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/hextechpal/segmenter/api/proto/contracts"
 	"github.com/hextechpal/segmenter/internal/segmenter/locker"
@@ -11,10 +16,6 @@ import (
 	"github.com/hextechpal/segmenter/internal/segmenter/utils"
 	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/encoding/protojson"
-	"math"
-	"sort"
-	"sync"
-	"time"
 )
 
 const maintenanceLoopInterval = 500 * time.Millisecond
@@ -211,7 +212,8 @@ func (s *Stream) maintenanceLoop(group string) {
 }
 
 func (s *Stream) performMaintenance(ctx context.Context, group string) error {
-	lock, err := s.locker.Acquire(ctx, s.streamGroupAdmin(group), 100*time.Millisecond, "")
+	// FIX A: Increased lock timeout (2s) so pods wait for each other
+	lock, err := s.locker.Acquire(ctx, s.streamGroupAdmin(group), 2*time.Second, "")
 	if err != nil {
 		return err
 	}
@@ -228,10 +230,32 @@ func (s *Stream) performMaintenance(ctx context.Context, group string) error {
 	}
 
 	deadMembers := s.calculateDeadMembers(ctx, members)
-	if len(deadMembers) == 0 {
+	// FIX B: Identify missing local members (pods that are alive but not in mbsh)
+	var missingMembers []member
+	s.mu.Lock()
+	if groupMap, ok := s.consumers[group]; ok {
+		for id, _ := range groupMap {
+			if !members.Contains(id) {
+				missingMembers = append(missingMembers, member{
+					ID: id, JoinedAt: time.Now().UnixMilli(), Group: group,
+				})
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	// If no changes are needed, exit early
+	if len(deadMembers) == 0 && len(missingMembers) == 0 {
 		return nil
 	}
+	// Apply the changes: Remove dead, Add missing
 	aliveMembers := members.RemoveAll(deadMembers)
+	for _, m := range missingMembers {
+		// Double check to avoid duplicates
+		if !aliveMembers.Contains(m.ID) {
+			aliveMembers = append(aliveMembers, m)
+		}
+	}
 	sort.Sort(aliveMembers)
 	return s.updateMembers(ctx, aliveMembers, group)
 }
